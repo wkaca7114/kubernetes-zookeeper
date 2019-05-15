@@ -1,23 +1,19 @@
----
-
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: zookeeper
-
+  name: zk-cluster
+  labels:
+    name: zk-cluster
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
-  name: zk-svc
-  namespace: zookeeper
+  name: zk-headless-service
+  namespace: zk-cluster
   labels:
-    app: zk-svc
+    app: zk
 spec:
   ports:
-  - port: 2181
-    name: client
   - port: 2888
     name: server
   - port: 3888
@@ -25,64 +21,129 @@ spec:
   clusterIP: None
   selector:
     app: zk
-
 ---
-
+apiVersion: v1
+kind: Service
+metadata:
+  name: zk-client-service
+  namespace: zk-cluster
+  labels:
+    app: zk
+spec:
+  ports:
+  - port: 2181
+    name: client
+  selector:
+    app: zk
+---
 apiVersion: extensions/v1beta1
 kind: Ingress
 metadata:
-  name: zookeeper-ingress
-  namespace: zookeeper
-  annotations:
-    ingress.kubernetes.io/ssl-redirect: "false"
+  name: zk-ingress
+  namespace: zk-cluster
 spec:
   rules:
   - http:
       paths:
-      - path: /zookeeper
+      - path: /zk
         backend:
-          serviceName: zk-svc
+          serviceName: zk-client-service
           servicePort: 2181
-
 ---
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: zk-cm
-  namespace: zookeeper
-data:
-  jvm.heap: "1G"
-  tick: "2000"
-  init: "10"
-  sync: "5"
-  client.cnxns: "60"
-  snap.retain: "3"
-  purge.interval: "0"
-
----
-
 apiVersion: policy/v1beta1
 kind: PodDisruptionBudget
 metadata:
   name: zk-pdb
-  namespace: zookeeper
+  namespace: zk-cluster
 spec:
   selector:
     matchLabels:
       app: zk
-  minAvailable: 2
-
+  maxUnavailable: 1
 ---
-
-apiVersion: apps/v1beta1
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zk-1-local-pv
+  namespace: zk-cluster
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/zookeeper
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node1
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zk-2-local-pv
+  namespace: zk-cluster
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/zookeeper
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node2
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: zk-3-local-pv
+  namespace: zk-cluster
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/zookeeper
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node3
+---
+apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: zk
-  namespace: zookeeper
+  namespace: zk-cluster
 spec:
-  serviceName: zk-svc
+  selector:
+    matchLabels:
+      app: zk
+  serviceName: zk-headless-service
   replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
   template:
     metadata:
       labels:
@@ -95,17 +156,13 @@ spec:
                 matchExpressions:
                   - key: "app"
                     operator: In
-                    values: 
+                    values:
                     - zk
               topologyKey: "kubernetes.io/hostname"
       containers:
-      - name: k8szk
-        imagePullPolicy: Always
-        image: gcr.io/google_samples/k8szk:v3
-        resources:
-          requests:
-            memory: "2Gi"
-            cpu: "500m"
+      - name: kubernetes-zookeeper
+        imagePullPolicy: IfNotPresent
+        image: "k8s.gcr.io/kubernetes-zookeeper:1.0-3.4.10"
         ports:
         - containerPort: 2181
           name: client
@@ -113,64 +170,41 @@ spec:
           name: server
         - containerPort: 3888
           name: leader-election
-        env:
-        - name : ZK_REPLICAS
-          value: "3"
-        - name : ZK_HEAP_SIZE
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: jvm.heap
-        - name : ZK_TICK_TIME
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: tick
-        - name : ZK_INIT_LIMIT
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: init
-        - name : ZK_SYNC_LIMIT
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: tick
-        - name : ZK_MAX_CLIENT_CNXNS
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: client.cnxns
-        - name: ZK_SNAP_RETAIN_COUNT
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: snap.retain
-        - name: ZK_PURGE_INTERVAL
-          valueFrom:
-            configMapKeyRef:
-                name: zk-cm
-                key: purge.interval
-        - name: ZK_CLIENT_PORT
-          value: "2181"
-        - name: ZK_SERVER_PORT
-          value: "2888"
-        - name: ZK_ELECTION_PORT
-          value: "3888"
         command:
         - sh
         - -c
-        - zkGenConfig.sh && zkServer.sh start-foreground
+        - "start-zookeeper \
+          --servers=3 \
+          --data_dir=/var/lib/zookeeper/data \
+          --data_log_dir=/var/lib/zookeeper/data/log \
+          --conf_dir=/opt/zookeeper/conf \
+          --client_port=2181 \
+          --election_port=3888 \
+          --server_port=2888 \
+          --tick_time=2000 \
+          --init_limit=10 \
+          --sync_limit=5 \
+          --heap=512M \
+          --max_client_cnxns=60 \
+          --snap_retain_count=3 \
+          --purge_interval=12 \
+          --max_session_timeout=40000 \
+          --min_session_timeout=4000 \
+          --log_level=INFO"
         readinessProbe:
           exec:
             command:
-            - "zkOk.sh"
+            - sh
+            - -c
+            - "zookeeper-ready 2181"
           initialDelaySeconds: 10
           timeoutSeconds: 5
         livenessProbe:
           exec:
             command:
-            - "zkOk.sh"
+            - sh
+            - -c
+            - "zookeeper-ready 2181"
           initialDelaySeconds: 10
           timeoutSeconds: 5
         volumeMounts:
@@ -182,6 +216,9 @@ spec:
   volumeClaimTemplates:
   - metadata:
       name: datadir
+      namespace: zk-cluster
+      annotations:
+        volume.alpha.kubernetes.io/storage-class: local-storage
     spec:
       accessModes: [ "ReadWriteOnce" ]
       resources:
